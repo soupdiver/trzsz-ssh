@@ -31,7 +31,9 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"strconv"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -45,6 +47,7 @@ type fakeListener struct {
 	conns     chan net.Conn
 	done      chan struct{}
 	closeOnce sync.Once
+	addr      net.Addr
 }
 
 func (l *fakeListener) Accept() (net.Conn, error) {
@@ -61,7 +64,12 @@ func (l *fakeListener) Close() error {
 	return nil
 }
 
-func (l *fakeListener) Addr() net.Addr { return &net.TCPAddr{} }
+func (l *fakeListener) Addr() net.Addr {
+	if l.addr != nil {
+		return l.addr
+	}
+	return &net.TCPAddr{}
+}
 
 func (l *fakeListener) isClosed() bool {
 	select {
@@ -118,11 +126,30 @@ func (c *fakeSshClient) DialTimeout(network, addr string, timeout time.Duration)
 	return c.dialFn(network, addr)
 }
 
+var fakeListenPort atomic.Int32
+
 func (c *fakeSshClient) Listen(network, addr string) (net.Listener, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	l := &fakeListener{conns: make(chan net.Conn, 4), done: make(chan struct{})}
-	c.listeners[network+"|"+addr] = l
+	host, portStr, err := net.SplitHostPort(addr)
+	if err != nil {
+		return nil, err
+	}
+	if portStr == "0" {
+		portStr = strconv.Itoa(int(fakeListenPort.Add(1)) + 40000)
+	}
+	actualAddr := net.JoinHostPort(host, portStr)
+	port, _ := strconv.Atoi(portStr)
+	ip := net.ParseIP(host)
+	if ip == nil {
+		ip = net.IPv4zero
+	}
+	l := &fakeListener{
+		conns: make(chan net.Conn, 4),
+		done:  make(chan struct{}),
+		addr:  &net.TCPAddr{IP: ip, Port: port},
+	}
+	c.listeners[network+"|"+actualAddr] = l
 	return l, nil
 }
 
@@ -570,8 +597,20 @@ func TestMuxProxyRemoteForward(t *testing.T) {
 func TestMuxProxyRemoteForwardPortZero(t *testing.T) {
 	backend := newFakeSshClient()
 	client, _ := newMuxTestClient(t, backend)
-	_, err := client.Listen("tcp", "127.0.0.1:0")
-	require.Error(t, err)
+	listener, err := client.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	require.NotNil(t, listener)
+
+	tcpAddr, ok := listener.Addr().(*net.TCPAddr)
+	require.True(t, ok)
+	require.Greater(t, tcpAddr.Port, 0)
+
+	actualAddr := net.JoinHostPort("127.0.0.1", strconv.Itoa(tcpAddr.Port))
+	fl := backend.listener("tcp|" + actualAddr)
+	require.NotNil(t, fl)
+
+	require.NoError(t, listener.Close())
+	waitFor(t, "remote listener closed", fl.isClosed)
 }
 
 func TestMuxProxyGlobalRequests(t *testing.T) {

@@ -477,18 +477,20 @@ func (c *muxProxyConn) handleGlobalRequest(msg *sshGlobalRequestMsg) error {
 		if err := ssh.Unmarshal(msg.Data, &payload); err != nil {
 			return fmt.Errorf("parse tcpip-forward failed: %v", err)
 		}
-		if payload.Port == 0 {
-			warning("control master: remote forwarding with dynamic port 0 is not supported via control socket")
-			return c.replyGlobalRequest(msg, false)
-		}
 		port := strconv.Itoa(int(payload.Port))
 		listenAddr := net.JoinHostPort(payload.Addr, port)
 		if payload.Addr == "" || payload.Addr == "*" {
 			listenAddr = ":" + port
 		}
-		ok := c.addRemoteForward("tcp|"+net.JoinHostPort(payload.Addr, port), "forwarded-tcpip",
+		ok, allocatedPort := c.addRemoteForward("tcp|"+net.JoinHostPort(payload.Addr, port), "forwarded-tcpip",
 			"tcp", listenAddr, payload.Addr, payload.Port)
-		return c.replyGlobalRequest(msg, ok)
+		if !ok {
+			return c.replyGlobalRequest(msg, false)
+		}
+		if payload.Port == 0 {
+			return c.send(&sshRequestSuccessMsg{Data: ssh.Marshal(struct{ Port uint32 }{allocatedPort})})
+		}
+		return c.replyGlobalRequest(msg, true)
 	case "cancel-tcpip-forward":
 		var payload sshTcpipForwardPayload
 		if err := ssh.Unmarshal(msg.Data, &payload); err != nil {
@@ -501,7 +503,7 @@ func (c *muxProxyConn) handleGlobalRequest(msg *sshGlobalRequestMsg) error {
 		if err := ssh.Unmarshal(msg.Data, &payload); err != nil {
 			return fmt.Errorf("parse streamlocal-forward failed: %v", err)
 		}
-		ok := c.addRemoteForward("unix|"+payload.SocketPath, "forwarded-streamlocal@openssh.com",
+		ok, _ := c.addRemoteForward("unix|"+payload.SocketPath, "forwarded-streamlocal@openssh.com",
 			"unix", payload.SocketPath, payload.SocketPath, 0)
 		return c.replyGlobalRequest(msg, ok)
 	case "cancel-streamlocal-forward@openssh.com":
@@ -517,31 +519,71 @@ func (c *muxProxyConn) handleGlobalRequest(msg *sshGlobalRequestMsg) error {
 	}
 }
 
-func (c *muxProxyConn) addRemoteForward(key, chanType, network, listenAddr, addr string, port uint32) bool {
-	c.fwdMu.Lock()
-	_, exists := c.forwards[key]
-	c.fwdMu.Unlock()
-	if exists {
-		warning("control master: remote forwarding [%s] already exists", listenAddr)
-		return false
+func (c *muxProxyConn) addRemoteForward(key, chanType, network, listenAddr, addr string, port uint32) (bool, uint32) {
+	if port != 0 {
+		c.fwdMu.Lock()
+		_, exists := c.forwards[key]
+		c.fwdMu.Unlock()
+		if exists {
+			warning("control master: remote forwarding [%s] already exists", listenAddr)
+			return false, 0
+		}
 	}
 	listener, err := c.client.Listen(network, listenAddr)
 	if err != nil {
 		warning("control master: remote listen on [%s] failed: %v", listenAddr, err)
-		return false
+		return false, 0
 	}
-	f := &muxRemoteForward{key: key, chanType: chanType, addr: addr, port: port, listener: listener}
+	allocatedPort := port
+	if network == "tcp" && port == 0 {
+		allocatedPort = listenerPort(listener)
+		if allocatedPort == 0 {
+			_ = listener.Close()
+			warning("control master: remote listen on [%s] failed to allocate a port", listenAddr)
+			return false, 0
+		}
+		key = "tcp|" + net.JoinHostPort(addr, strconv.Itoa(int(allocatedPort)))
+	}
+	f := &muxRemoteForward{key: key, chanType: chanType, addr: addr, port: allocatedPort, listener: listener}
 	c.fwdMu.Lock()
 	if c.closed.Load() {
 		c.fwdMu.Unlock()
 		_ = listener.Close()
-		return false
+		return false, 0
+	}
+	if _, exists := c.forwards[key]; exists {
+		c.fwdMu.Unlock()
+		_ = listener.Close()
+		warning("control master: remote forwarding [%s] already exists", listenAddr)
+		return false, 0
 	}
 	c.forwards[key] = f
 	c.fwdMu.Unlock()
 	go c.acceptLoop(f)
 	debug("control master: remote forwarding [%s] started", listenAddr)
-	return true
+	return true, allocatedPort
+}
+
+func listenerPort(listener net.Listener) uint32 {
+	if listener == nil {
+		return 0
+	}
+	return addrPort(listener.Addr())
+}
+
+func addrPort(addr net.Addr) uint32 {
+	if addr == nil {
+		return 0
+	}
+	if tcpAddr, ok := addr.(*net.TCPAddr); ok && tcpAddr.Port > 0 {
+		return uint32(tcpAddr.Port)
+	}
+	if host, portStr, err := net.SplitHostPort(addr.String()); err == nil {
+		if port, err := strconv.Atoi(portStr); err == nil && port > 0 && net.ParseIP(host) != nil {
+			return uint32(port)
+		}
+	}
+	return 0
 }
 
 func (c *muxProxyConn) cancelRemoteForward(key string) bool {
