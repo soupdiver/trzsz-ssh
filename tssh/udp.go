@@ -250,6 +250,7 @@ func udpLogin(param *sshParam, tcpClient SshClient) (SshClient, error) {
 	tsshdPath := getTsshdPath(args)
 	connectTimeout := getConnectTimeout(args)
 	sessionName := getExOptionConfig(args, "UdpSessionName")
+	udpCompress := getUdpCompress(args)
 	var tsshdCmdBuf *strings.Builder
 	if args.Attach || strings.EqualFold(getExOptionConfig(args, "UdpSessionAttach"), "yes") {
 		attachMode = true
@@ -343,6 +344,7 @@ func udpLogin(param *sshParam, tcpClient SshClient) (SshClient, error) {
 		DiscardCallback:      handleTmuxDiscardedInput,
 		ProxyCommand:         proxyCmd,
 		ShouldPauseReconnect: shouldPauseReconnect,
+		Compress:             udpCompress,
 	}
 
 	if param.proxy != nil {
@@ -380,6 +382,20 @@ func udpLogin(param *sshParam, tcpClient SshClient) (SshClient, error) {
 	go udpClient.udpKeepAlive()
 
 	return udpClient, nil
+}
+
+// getUdpCompress returns the session output compression requested by the UdpCompress
+// option: "zstd", or "" for no compression (the default).
+func getUdpCompress(args *sshArgs) string {
+	switch value := getExOptionConfig(args, "UdpCompress"); {
+	case strings.EqualFold(value, "zstd"):
+		return "zstd"
+	case value == "" || strings.EqualFold(value, "no"):
+		return ""
+	default:
+		warning("unknown UdpCompress [%s], expected zstd or no", value)
+		return ""
+	}
 }
 
 func startTsshdServer(args *sshArgs, tcpClient SshClient, tsshdCmd string) (*tsshd.ServerInfo, error) {

@@ -81,3 +81,5 @@ require (
 	golang.org/x/time v0.16.0 // indirect
 	google.golang.org/protobuf v1.36.12 // indirect
 )
+
+replace github.com/trzsz/tsshd => github.com/soupdiver/tsshd v0.1.11-0.20261029124959-bed89951fce7

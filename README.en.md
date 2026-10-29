@@ -1021,6 +1021,7 @@ Host xxx
     #!! UdpMTU 1400
     #!! UdpSessionAttach no
     #!! UdpSessionName xxx
+    #!! UdpCompress no
 ```
 
 - `UdpMode`: `no` (the default: tssh works in TCP mode), `yes` (default protocol: `QUIC`), `QUIC` ([QUIC](https://github.com/quic-go/quic-go) protocol: faster speed), `KCP` ([KCP](https://github.com/xtaci/kcp-go) protocol: lower latency).
@@ -1046,6 +1047,8 @@ Host xxx
 - `UdpMTU`: Sets the maximum transmission unit (MTU) for UDP packets. Default is 1400.
 
 - `UdpSessionAttach`: Defaults to `no`. When set to `yes`, it allows attaching to an existing session on the server. Meanwhile, the current session will also be made attachable, allowing you to re-attach to it later when logging in from other devices or networks.
+
+- `UdpCompress`: Defaults to `no`. When set to `zstd`, the server compresses the session output with zstd, which greatly reduces the bandwidth of redraw-heavy terminal programs on slow links. It has no effect when `UdpSessionAttach` is `yes` or when logging in with `--attach`.
 
 - `UdpSessionName`: Customizes the session name. This only takes effect when `UdpSessionAttach` is set to `yes` or when logging in with the `--attach` argument. If a session with this name already exists on the server, it will attach directly; if not, a new session with this name will be created for automatic attachment in future logins.
 
