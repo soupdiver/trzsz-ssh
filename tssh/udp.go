@@ -279,6 +279,10 @@ func udpLogin(param *sshParam, tcpClient SshClient) (SshClient, error) {
 	if err != nil {
 		return nil, fmt.Errorf("udp login to [%s] start tsshd on remote failed: %v", args.Destination, err)
 	}
+	ipv4, ipv6, err := getUdpAddressFamily(param, serverInfo)
+	if err != nil {
+		return nil, fmt.Errorf("udp login to [%s] failed: %v", args.Destination, err)
+	}
 
 	// proxy command
 	var proxyCmd string
@@ -307,12 +311,6 @@ func udpLogin(param *sshParam, tcpClient SshClient) (SshClient, error) {
 	// and at least 3 attempts before reconnect or showing a connection lost notification.
 	intervalTime := min(globalUdpAliveTimeout/10, min(heartbeatTimeout, reconnectTimeout)/3)
 	debug("udp keep alive interval time [%v] for [%s]", intervalTime, args.Destination)
-
-	ipv4, ipv6 := param.ipv4, param.ipv6
-	if ipv4 == ipv6 { // (ipv4 && ipv6) || (!ipv4 && !ipv6)
-		// If the IP version is ambiguous from the current SSH connection (e.g., via ControlPath), fall back to user settings.
-		_, ipv4, ipv6 = getNetworkAddressFamily(args)
-	}
 
 	// new udp client
 	udpClient := &sshUdpClient{
@@ -381,6 +379,30 @@ func udpLogin(param *sshParam, tcpClient SshClient) (SshClient, error) {
 	go udpClient.udpKeepAlive()
 
 	return udpClient, nil
+}
+
+// ControlPath hides the SSH family; attach can reuse a daemon bound to another
+// family. Prefer the listener's family unless the user explicitly selects one.
+func getUdpAddressFamily(param *sshParam, info *tsshd.ServerInfo) (bool, bool, error) {
+	_, ipv4, ipv6 := getNetworkAddressFamily(param.args)
+	server4, server6 := info.AddressFamily == "inet", info.AddressFamily == "inet6"
+	if ipv4 != ipv6 {
+		if (ipv4 && server6) || (ipv6 && server4) {
+			requested := "inet"
+			if ipv6 {
+				requested = "inet6"
+			}
+			return false, false, fmt.Errorf("requested AddressFamily %s conflicts with tsshd listener AddressFamily %s", requested, info.AddressFamily)
+		}
+		return ipv4, ipv6, nil
+	}
+	if server4 || server6 {
+		return server4, server6, nil
+	}
+	if param.ipv4 != param.ipv6 {
+		return param.ipv4, param.ipv6, nil
+	}
+	return false, false, nil
 }
 
 func startTsshdServer(args *sshArgs, tcpClient SshClient, tsshdCmd string) (*tsshd.ServerInfo, error) {
